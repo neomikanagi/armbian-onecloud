@@ -2,6 +2,8 @@ name: CI
 
 on:
   workflow_dispatch:
+  schedule: # 每月1日自动触发
+    - cron: '0 0 1 * *'
   push:
     branches:
       - readme
@@ -194,19 +196,18 @@ jobs:
           - current
         RELEASE:
           # - focal # Ubuntu 20.04 LTS
-          - jammy # Ubuntu 22.04 LTS
-          # - lunar # Ubuntu 23.04
+          # - jammy # Ubuntu 22.04 LTS
+          - noble # Ubuntu 24.04 LTS
           # - buster # Debian 10
-          - bullseye # Debian 11
+          # - bullseye # Debian 11
           - bookworm # Debian 12
-          - sid # Debian unstable
         TYPE:
           - minimal
-          - cli
+          # - cli
           - desktop
         include:
           - TYPE: desktop
-            DESKTOP_ENVIRONMENT: xfce
+            DESKTOP_ENVIRONMENT: LXDE
             DESKTOP_ENVIRONMENT_CONFIG_NAME: config_base
             DESKTOP_APPGROUPS_SELECTED: ""
         exclude:
