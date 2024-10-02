@@ -207,7 +207,7 @@ jobs:
           # - desktop
         include:
           - TYPE: desktop
-            DESKTOP_ENVIRONMENT: LXDE
+            DESKTOP_ENVIRONMENT: xfce
             DESKTOP_ENVIRONMENT_CONFIG_NAME: config_base
             DESKTOP_APPGROUPS_SELECTED: ""
         exclude:
