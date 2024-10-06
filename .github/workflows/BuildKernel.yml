@@ -1,0 +1,32 @@
+name: Build Single File Kernel
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git curl build-essential gcc-aarch64-linux-gnu libssl-dev bison flex bc
+
+      - name: Clone Armbian build script
+        run: |
+          git clone https://github.com/armbian/build.git
+          cd build
+          ./compile.sh KERNEL_ONLY=yes KERNEL_CONFIGURE=no BOARD=onecloud BRANCH=current
+
+      - name: Package kernel into tar.gz
+        run: |
+          cd output/debs
+          tar -czvf armbian-kernel.tar.gz *.deb
+
+      - name: Upload kernel tar.gz
+        uses: actions/upload-artifact@v3
+        with:
+          name: kernel-targz
+          path: output/debs/armbian-kernel.tar.gz
