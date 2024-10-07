@@ -50,10 +50,10 @@ jobs:
           EOF
           echo "env=$(cat $GITHUB_ENV | base64 -w 0)" >>$GITHUB_OUTPUT
 
-build-debs:
+  build-debs:
     name: Build ${{ matrix.BRANCH }}
     needs: prepare
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
@@ -87,6 +87,7 @@ build-debs:
 
       - name: Build
         run: |
+          # 不更新远程缓存
           export GITHUB_ACTIONS=false
           sudo --preserve-env \
             ./compile.sh kernel \
@@ -97,18 +98,37 @@ build-debs:
               USE_CCACHE=no
           sudo chown $(id -u):$(id -g) -R output/
 
-      # 打包 kernel.tar.gz
+      # 新增步骤：将内核打包为 .tar.gz
       - name: Package kernel into tar.gz
         run: |
           cd output/debs
           tar -czvf armbian-kernel-${{ matrix.BRANCH }}.tar.gz *.deb
 
-      - name: Upload deb packages
+      - name: Upload Debian release
+        if: ${{ matrix.BRANCH == 'current' }} # 如果是Debian相关的分支
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "kernel-${{ env.TIME }}"
+          tag_name: Debian-${{ env.TIME }}
+          files: |
+            output/debs/*.deb
+          body: "Debian build release for ${{ matrix.BRANCH }} on ${{ env.TIME }}"
+
+      - name: Upload Ubuntu release
+        if: ${{ matrix.BRANCH == 'edge' }} # 如果是Ubuntu相关的分支
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: Ubuntu-${{ env.TIME }}
+          files: |
+            output/debs/*.deb
+          body: "Ubuntu build release for ${{ matrix.BRANCH }} on ${{ env.TIME }}"
+
+      - name: Upload kernel release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: kernel-${{ env.TIME }}
           files: |
             output/debs/armbian-kernel-${{ matrix.BRANCH }}.tar.gz
+          body: "Kernel release for ${{ matrix.BRANCH }} on ${{ env.TIME }}"
 
   build:
     name: Build ${{ matrix.RELEASE }}-${{ matrix.BRANCH }}-${{ matrix.TYPE == 'desktop' && matrix.DESKTOP_ENVIRONMENT || matrix.TYPE }}
@@ -121,8 +141,24 @@ build-debs:
           - edge
           - current
         RELEASE:
+          # - focal # Ubuntu 20.04 LTS
+          # - jammy # Ubuntu 22.04 LTS
           - noble # Ubuntu 24.04 LTS
+          # - buster # Debian 10
+          # - bullseye # Debian 11
           - bookworm # Debian 12
+        TYPE:
+          - minimal
+          # - cli
+          # - desktop
+#        include:
+#          - TYPE: desktop
+#            DESKTOP_ENVIRONMENT: xfce
+#            DESKTOP_ENVIRONMENT_CONFIG_NAME: config_base
+#            DESKTOP_APPGROUPS_SELECTED: ""
+#        exclude:
+#          - RELEASE: sid
+#            TYPE: desktop
 
     steps:
       - name: Import env
@@ -135,8 +171,28 @@ build-debs:
           repository: ${{ env.ARMBIAN_REPO }}
           ref: ${{ env.ARMBIAN_SHA }}
 
+      - name: "Apply patch ${{ env.PATCHES }}"
+        if: ${{ env.PATCHES }}
+        run: |
+          echo "::group::Download"
+          curl -L -O "https://github.com/armbian/build/pull/{${PATCHES}}.patch"
+          echo "::endgroup::"
+
+          for file in *.patch; do
+            echo "::group::Applying $file"
+            patch --batch -p1 -N <"$file"
+            echo "::endgroup::"
+          done
+
+      - name: Download debs
+        uses: actions/download-artifact@v3
+        with:
+          name: debs-${{ matrix.BRANCH }}
+          path: output/debs/
+
       - name: Build
         run: |
+          # 不更新远程缓存
           export GITHUB_ACTIONS=false
           sudo --preserve-env \
             ./compile.sh build \
@@ -148,24 +204,82 @@ build-debs:
               BUILD_MINIMAL=${{ matrix.TYPE == 'minimal' && 'yes' || 'no' }} \
               BUILD_DESKTOP=${{ matrix.TYPE == 'desktop' && 'yes' || 'no' }} \
               DESKTOP_ENVIRONMENT=${{ matrix.DESKTOP_ENVIRONMENT }} \
+              DESKTOP_ENVIRONMENT_CONFIG_NAME=${{ matrix.DESKTOP_ENVIRONMENT_CONFIG_NAME }} \
+              DESKTOP_APPGROUPS_SELECTED=${{ matrix.DESKTOP_APPGROUPS_SELECTED }} \
               EXPERT=yes \
+              SKIP_EXTERNAL_TOOLCHAINS=yes \
+              CLEAN_LEVEL= \
               USE_CCACHE=no \
               COMPRESS_OUTPUTIMAGE=img
           sudo chown $(id -u):$(id -g) -R output/
 
-      - name: Upload Debian artifacts
-        if: matrix.RELEASE == 'bookworm'
+      - name: Install Dependents
+        run: |
+          sudo apt install img2simg
+
+          ver="v0.3.1"
+          curl -L -o ./AmlImg https://github.com/hzyitc/AmlImg/releases/download/$ver/AmlImg_${ver}_linux_amd64
+          chmod +x ./AmlImg
+
+      - name: Download and unpack the latest u-boot
+        run: |
+          echo "::group::Download"
+          curl -L -o ./uboot.img https://github.com/${UBOOT_REPO}/releases/download/${UBOOT_TAG}/${UBOOT_BURNIMG}
+          echo "::endgroup::"
+
+          echo "::group::Unpack"
+          ./AmlImg unpack ./uboot.img burn/
+          echo "::endgroup::"
+
+      - name: Extract boot and rootfs partitions
+        run: |
+          diskimg=$(ls output/images/*.img)
+          loop=$(sudo losetup --find --show --partscan $diskimg)
+          sudo img2simg ${loop}p1 burn/boot.simg
+          sudo img2simg ${loop}p2 burn/rootfs.simg
+          sudo losetup -d $loop
+          sudo chown $(id -u):$(id -g) -R burn/
+
+      - name: Generate burn image
+        run: |
+          echo -n "sha1sum $(sha1sum burn/boot.simg | awk '{print $1}')" >burn/boot.VERIFY
+          echo -n "sha1sum $(sha1sum burn/rootfs.simg | awk '{print $1}')" >burn/rootfs.VERIFY
+
+          cat <<EOF >>burn/commands.txt
+          PARTITION:boot:sparse:boot.simg
+          VERIFY:boot:normal:boot.VERIFY
+          PARTITION:rootfs:sparse:rootfs.simg
+          VERIFY:rootfs:normal:rootfs.VERIFY
+          EOF
+
+          prefix=$(ls output/images/*.img | sed 's/\.img$//')
+          burnimg=${prefix}.burn.img
+          ./AmlImg pack $burnimg burn/
+
+      - name: Hash and compress images
+        run: |
+          for f in output/images/*.img; do
+            sha256sum "$f" | tee -a sha256sum
+            xz --threads=0 --compress "$f"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.RELEASE }}-${{ matrix.BRANCH }}-${{ matrix.TYPE == 'desktop' && matrix.DESKTOP_ENVIRONMENT || matrix.TYPE }}
+          path: output/images/*
+
+      - name: Generate release informations
+        run: |
+          cat <<EOF | sed -E 's/^  //' | tee Release.md
+            $(cat sha256sum | awk '{printf "%s: `%s`\n", $2, $1}')
+          EOF
+
+      - name: Upload to release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "Debian-${{ env.TIME }}"
+          tag_name: ${{ env.TAG }}
+          append_body: true
+          body_path: Release.md
           files: |
-            output/images/*.img
-
-      - name: Upload Ubuntu artifacts
-        if: matrix.RELEASE == 'noble'
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: "Ubuntu-${{ env.TIME }}"
-          files: |
-            output/images/*.img
-
+            output/images/*
