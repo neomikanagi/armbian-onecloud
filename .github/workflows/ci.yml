@@ -50,19 +50,16 @@ jobs:
           EOF
           echo "env=$(cat $GITHUB_ENV | base64 -w 0)" >>$GITHUB_OUTPUT
 
-  build-debs:
+build-debs:
     name: Build ${{ matrix.BRANCH }}
     needs: prepare
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         BRANCH:
           - edge
           - current
-        RELEASE:
-          - bookworm
-          - jammy
 
     steps:
       - name: Import env
@@ -90,56 +87,85 @@ jobs:
 
       - name: Build
         run: |
-          # 不更新远程缓存
           export GITHUB_ACTIONS=false
           sudo --preserve-env \
             ./compile.sh kernel \
               ALLOW_ROOT=yes \
               BOARD=onecloud \
               BRANCH=${{ matrix.BRANCH }} \
-              RELEASE=${{ matrix.RELEASE }} \
               EXPERT=yes \
               USE_CCACHE=no
           sudo chown $(id -u):$(id -g) -R output/
 
+      # 打包 kernel.tar.gz
       - name: Package kernel into tar.gz
         run: |
           cd output/debs
-          tar -czvf armbian-kernel-${{ matrix.BRANCH }}-${{ matrix.RELEASE }}.tar.gz *.deb
+          tar -czvf armbian-kernel-${{ matrix.BRANCH }}.tar.gz *.deb
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+      - name: Upload deb packages
+        uses: softprops/action-gh-release@v1
         with:
-          name: debs-${{ matrix.BRANCH }}-${{ matrix.RELEASE }}
-          path: output/debs/*
+          tag_name: "kernel-${{ env.TIME }}"
+          files: |
+            output/debs/armbian-kernel-${{ matrix.BRANCH }}.tar.gz
 
-  create-releases:
-    name: Create Releases
-    needs: build-debs
+  build:
+    name: Build ${{ matrix.RELEASE }}-${{ matrix.BRANCH }}-${{ matrix.TYPE == 'desktop' && matrix.DESKTOP_ENVIRONMENT || matrix.TYPE }}
+    needs: [ prepare, build-debs ]
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        BRANCH:
+          - edge
+          - current
+        RELEASE:
+          - noble # Ubuntu 24.04 LTS
+          - bookworm # Debian 12
+
     steps:
-      # Debian Release
-      - name: Create Debian Release
-        if: ${{ matrix.RELEASE == 'bookworm' }}
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: debian-${{ env.TAG }}
-          files: |
-            output/debs/armbian-kernel-${{ matrix.BRANCH }}-bookworm.tar.gz
+      - name: Import env
+        run: |
+          echo "$(echo "${{ needs.prepare.outputs.env }}" | base64 -d)" >>$GITHUB_ENV
 
-      # Ubuntu Release
-      - name: Create Ubuntu Release
-        if: ${{ matrix.RELEASE == 'jammy' }}
-        uses: softprops/action-gh-release@v1
+      - name: Checkout
+        uses: actions/checkout@v3
         with:
-          tag_name: ubuntu-${{ env.TAG }}
-          files: |
-            output/debs/armbian-kernel-${{ matrix.BRANCH }}-jammy.tar.gz
+          repository: ${{ env.ARMBIAN_REPO }}
+          ref: ${{ env.ARMBIAN_SHA }}
 
-      # Kernel Release
-      - name: Create Kernel Release
+      - name: Build
+        run: |
+          export GITHUB_ACTIONS=false
+          sudo --preserve-env \
+            ./compile.sh build \
+              ALLOW_ROOT=yes \
+              BOARD=onecloud \
+              BRANCH=${{ matrix.BRANCH }} \
+              RELEASE=${{ matrix.RELEASE }} \
+              KERNEL_CONFIGURE=no \
+              BUILD_MINIMAL=${{ matrix.TYPE == 'minimal' && 'yes' || 'no' }} \
+              BUILD_DESKTOP=${{ matrix.TYPE == 'desktop' && 'yes' || 'no' }} \
+              DESKTOP_ENVIRONMENT=${{ matrix.DESKTOP_ENVIRONMENT }} \
+              EXPERT=yes \
+              USE_CCACHE=no \
+              COMPRESS_OUTPUTIMAGE=img
+          sudo chown $(id -u):$(id -g) -R output/
+
+      - name: Upload Debian artifacts
+        if: matrix.RELEASE == 'bookworm'
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: kernel-${{ env.TAG }}
+          tag_name: "Debian-${{ env.TIME }}"
           files: |
-            output/debs/armbian-kernel-${{ matrix.BRANCH }}-*.tar.gz
+            output/images/*.img
+
+      - name: Upload Ubuntu artifacts
+        if: matrix.RELEASE == 'noble'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "Ubuntu-${{ env.TIME }}"
+          files: |
+            output/images/*.img
+
