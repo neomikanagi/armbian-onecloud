@@ -1,8 +1,8 @@
 name: CI
 
 on:
-  workflow_dispatch:  # 手动触发
-  schedule:           # 每月1日自动触发
+  workflow_dispatch:
+  schedule: # 每月1日自动触发
     - cron: '0 0 1 * *'
   push:
     branches:
@@ -94,12 +94,11 @@ jobs:
               ALLOW_ROOT=yes \
               BOARD=onecloud \
               BRANCH=${{ matrix.BRANCH }} \
-              RELEASE=bookworm \  # 这里指定操作系统发行版，避免交互式选择
               EXPERT=yes \
               USE_CCACHE=no
           sudo chown $(id -u):$(id -g) -R output/
 
-      # 新增打包内核为 tar.gz
+      # 新增步骤：将内核打包为 .tar.gz
       - name: Package kernel into tar.gz
         run: |
           cd output/debs
@@ -129,10 +128,24 @@ jobs:
           - edge
           - current
         RELEASE:
+          # - focal # Ubuntu 20.04 LTS
+          # - jammy # Ubuntu 22.04 LTS
           - noble # Ubuntu 24.04 LTS
+          # - buster # Debian 10
+          # - bullseye # Debian 11
           - bookworm # Debian 12
         TYPE:
           - minimal
+          # - cli
+          # - desktop
+#        include:
+#          - TYPE: desktop
+#            DESKTOP_ENVIRONMENT: xfce
+#            DESKTOP_ENVIRONMENT_CONFIG_NAME: config_base
+#            DESKTOP_APPGROUPS_SELECTED: ""
+#        exclude:
+#          - RELEASE: sid
+#            TYPE: desktop
 
     steps:
       - name: Import env
@@ -178,7 +191,11 @@ jobs:
               BUILD_MINIMAL=${{ matrix.TYPE == 'minimal' && 'yes' || 'no' }} \
               BUILD_DESKTOP=${{ matrix.TYPE == 'desktop' && 'yes' || 'no' }} \
               DESKTOP_ENVIRONMENT=${{ matrix.DESKTOP_ENVIRONMENT }} \
+              DESKTOP_ENVIRONMENT_CONFIG_NAME=${{ matrix.DESKTOP_ENVIRONMENT_CONFIG_NAME }} \
+              DESKTOP_APPGROUPS_SELECTED=${{ matrix.DESKTOP_APPGROUPS_SELECTED }} \
               EXPERT=yes \
+              SKIP_EXTERNAL_TOOLCHAINS=yes \
+              CLEAN_LEVEL= \
               USE_CCACHE=no \
               COMPRESS_OUTPUTIMAGE=img
           sudo chown $(id -u):$(id -g) -R output/
@@ -186,9 +203,45 @@ jobs:
       - name: Install Dependents
         run: |
           sudo apt install img2simg
+
           ver="v0.3.1"
           curl -L -o ./AmlImg https://github.com/hzyitc/AmlImg/releases/download/$ver/AmlImg_${ver}_linux_amd64
           chmod +x ./AmlImg
+
+      - name: Download and unpack the latest u-boot
+        run: |
+          echo "::group::Download"
+          curl -L -o ./uboot.img https://github.com/${UBOOT_REPO}/releases/download/${UBOOT_TAG}/${UBOOT_BURNIMG}
+          echo "::endgroup::"
+
+          echo "::group::Unpack"
+          ./AmlImg unpack ./uboot.img burn/
+          echo "::endgroup::"
+
+      - name: Extract boot and rootfs partitions
+        run: |
+          diskimg=$(ls output/images/*.img)
+          loop=$(sudo losetup --find --show --partscan $diskimg)
+          sudo img2simg ${loop}p1 burn/boot.simg
+          sudo img2simg ${loop}p2 burn/rootfs.simg
+          sudo losetup -d $loop
+          sudo chown $(id -u):$(id -g) -R burn/
+
+      - name: Generate burn image
+        run: |
+          echo -n "sha1sum $(sha1sum burn/boot.simg | awk '{print $1}')" >burn/boot.VERIFY
+          echo -n "sha1sum $(sha1sum burn/rootfs.simg | awk '{print $1}')" >burn/rootfs.VERIFY
+
+          cat <<EOF >>burn/commands.txt
+          PARTITION:boot:sparse:boot.simg
+          VERIFY:boot:normal:boot.VERIFY
+          PARTITION:rootfs:sparse:rootfs.simg
+          VERIFY:rootfs:normal:rootfs.VERIFY
+          EOF
+
+          prefix=$(ls output/images/*.img | sed 's/\.img$//')
+          burnimg=${prefix}.burn.img
+          ./AmlImg pack $burnimg burn/
 
       - name: Hash and compress images
         run: |
@@ -197,10 +250,23 @@ jobs:
             xz --threads=0 --compress "$f"
           done
 
-      - name: Upload images to release
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.RELEASE }}-${{ matrix.BRANCH }}-${{ matrix.TYPE == 'desktop' && matrix.DESKTOP_ENVIRONMENT || matrix.TYPE }}
+          path: output/images/*
+
+      - name: Generate release informations
+        run: |
+          cat <<EOF | sed -E 's/^  //' | tee Release.md
+            $(cat sha256sum | awk '{printf "%s: `%s`\n", $2, $1}')
+          EOF
+
+      - name: Upload to release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ env.TAG }}
           append_body: true
+          body_path: Release.md
           files: |
             output/images/*
