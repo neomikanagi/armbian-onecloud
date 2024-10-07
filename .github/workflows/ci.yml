@@ -104,31 +104,18 @@ jobs:
           cd output/debs
           tar -czvf armbian-kernel-${{ matrix.BRANCH }}.tar.gz *.deb
 
-      - name: Upload Debian release
-        if: ${{ matrix.BRANCH == 'current' }} # 如果是Debian相关的分支
-        uses: softprops/action-gh-release@v1
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
         with:
-          tag_name: Debian-${{ env.TIME }}
-          files: |
-            output/debs/*.deb
-          body: "Debian build release for ${{ matrix.BRANCH }} on ${{ env.TIME }}"
+          name: debs-${{ matrix.BRANCH }}
+          path: output/debs/*
 
-      - name: Upload Ubuntu release
-        if: ${{ matrix.BRANCH == 'edge' }} # 如果是Ubuntu相关的分支
+      - name: Upload tar.gz to release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: Ubuntu-${{ env.TIME }}
-          files: |
-            output/debs/*.deb
-          body: "Ubuntu build release for ${{ matrix.BRANCH }} on ${{ env.TIME }}"
-
-      - name: Upload kernel release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: kernel-${{ env.TIME }}
+          tag_name: ${{ env.TAG }}
           files: |
             output/debs/armbian-kernel-${{ matrix.BRANCH }}.tar.gz
-          body: "Kernel release for ${{ matrix.BRANCH }} on ${{ env.TIME }}"
 
   build:
     name: Build ${{ matrix.RELEASE }}-${{ matrix.BRANCH }}-${{ matrix.TYPE == 'desktop' && matrix.DESKTOP_ENVIRONMENT || matrix.TYPE }}
