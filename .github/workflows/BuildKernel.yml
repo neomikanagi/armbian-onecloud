@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+
     steps:
       - name: Install dependencies
         run: |
@@ -18,15 +19,15 @@ jobs:
         run: |
           git clone https://github.com/armbian/build.git
           cd build
-          ./compile.sh KERNEL_ONLY=yes KERNEL_CONFIGURE=no BOARD=onecloud BRANCH=current
+          ./compile.sh KERNEL_ONLY=yes KERNEL_CONFIGURE=no BOARD=onecloud BRANCH=current RELEASE=bookworm
 
       - name: Package kernel into tar.gz
         run: |
-          cd output/debs
+          cd build/output/debs
           tar -czvf armbian-kernel.tar.gz *.deb
 
       - name: Upload kernel tar.gz
         uses: actions/upload-artifact@v3
         with:
           name: kernel-targz
-          path: output/debs/armbian-kernel.tar.gz
+          path: build/output/debs/armbian-kernel.tar.gz
