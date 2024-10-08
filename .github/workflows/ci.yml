@@ -97,13 +97,16 @@ jobs:
               USE_CCACHE=no
           sudo chown $(id -u):$(id -g) -R output/
 
+      # 仅对不包含 'burn' 的步骤进行仓库内容的下载和复制
       - name: Download onecloud-emmc-install repository
+        if: "! contains( matrix.TYPE, 'burn' )"
         run: |
           echo "::group::Download onecloud-emmc-install"
           git clone https://github.com/raysworld/onecloud-emmc-install /tmp/onecloud-emmc-install
           echo "::endgroup::"
 
       - name: Copy onecloud-emmc-install content to boot folder
+        if: "! contains( matrix.TYPE, 'burn' )"
         run: |
           echo "::group::Copy files"
           cp -r /tmp/onecloud-emmc-install/* output/debs/boot/
