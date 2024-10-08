@@ -1,5 +1,3 @@
-name: CI
-
 on:
   workflow_dispatch:
   push:
@@ -48,8 +46,81 @@ jobs:
           EOF
           echo "env=$(cat $GITHUB_ENV | base64 -w 0)" >>$GITHUB_OUTPUT
 
-  build:
-    name: Build ${{ matrix.RELEASE }}-${{ matrix.BRANCH }}-${{ matrix.TYPE == 'desktop' && matrix.DESKTOP_ENVIRONMENT || matrix.TYPE }}
+      - name: Show repositories information
+        run: |
+          C_RESET="\e[0m"
+          C_BLACK="\e[30m"
+          C_RED="\e[31m"
+          C_GREEN="\e[32m"
+          C_YELLOW="\e[33m"
+          C_BLUE="\e[34m"
+          C_MAGENTA="\e[35m"
+          C_CYAN="\e[36m"
+          C_GRAY="\e[37m"
+
+          echo -e "$(cat <<EOF | sed -E 's/^  //'
+            TIME: ${C_GREEN}$(date -d "$TIME" +'%Y-%m-%d %H:%M:%S %Z(%:z)')${C_RESET}
+            Script: ${C_BLUE}${SCRIPT_REPO}${C_RESET}@${C_MAGENTA}${SCRIPT_REF}${C_RESET}(https://github.com/${SCRIPT_REPO}/tree/${SCRIPT_REF})
+                    ${C_YELLOW}${SCRIPT_SHA}${C_RESET}(https://github.com/${SCRIPT_REPO}/tree/${SCRIPT_SHA})
+            U-Boot: ${C_BLUE}${UBOOT_REPO}${C_RESET}@${C_MAGENTA}${UBOOT_RELEASE}${C_RESET}(https://github.com/${UBOOT_REPO}/releases/tag/${UBOOT_RELEASE})
+                    ${C_MAGENTA}${UBOOT_TAG}${C_RESET}(https://github.com/${UBOOT_REPO}/releases/tag/${UBOOT_TAG})
+            Armbian: ${C_BLUE}${ARMBIAN_REPO}${C_RESET}@${C_MAGENTA}${ARMBIAN_REF}${C_RESET}(https://github.com/${ARMBIAN_REPO}/tree/${ARMBIAN_REF})
+                     ${C_YELLOW}${ARMBIAN_SHA}${C_RESET}(https://github.com/${ARMBIAN_REPO}/tree/${ARMBIAN_SHA})
+          EOF
+          )"
+
+          if [[ -n "${PATCHES}" ]]; then
+            echo -e "\nPatches:"
+            while read -r id; do
+              echo -e "  ${C_BLUE}armbian/build${C_RESET}#${C_MAGENTA}${id}${C_RESET}(http://github.com/armbian/build/pull/${id})"
+            done < <(echo -e "${PATCHES}" | tr ',' '\n')
+          fi
+
+          cat <<EOF | sed -E 's/^  //' >>$GITHUB_STEP_SUMMARY
+            # $(date -d "$TIME" +'%Y-%m-%d %H:%M:%S %Z(%:z)')
+
+            ## Sources
+            Script: [${SCRIPT_REPO}@${SCRIPT_REF}](https://github.com/${SCRIPT_REPO}/tree/${SCRIPT_REF}) ([\`${SCRIPT_SHA}\`](https://github.com/${SCRIPT_REPO}/tree/${SCRIPT_SHA}))
+            U-Boot: [${UBOOT_REPO}@${UBOOT_RELEASE}](https://github.com/${UBOOT_REPO}/releases/tag/${UBOOT_RELEASE}) ([\`${UBOOT_TAG}\`](https://github.com/${UBOOT_REPO}/releases/tag/${UBOOT_TAG}))
+            Armbian: [${ARMBIAN_REPO}@${ARMBIAN_REF}](https://github.com/${ARMBIAN_REPO}/tree/${ARMBIAN_REF}) ([\`${ARMBIAN_SHA}\`](https://github.com/${ARMBIAN_REPO}/tree/${ARMBIAN_SHA}))
+
+            ${PATCHES:+$(
+              echo "## Patches"
+              echo "${PATCHES}" | tr ',' '\n' | sed -E 's|(.*)|[armbian/build#\1](http://github.com/armbian/build/pull/\1)|'
+            )}
+          EOF
+
+      - name: Generate release informations
+        run: |
+          cat <<EOF | sed -E 's/^  //' | tee Release.md
+            CI $(date -d "$TIME" +'%Y-%m-%d %H:%M:%S %Z(%:z)')
+
+            # Sources
+            Script: [${SCRIPT_REPO}@${SCRIPT_REF}](https://github.com/${SCRIPT_REPO}/tree/${SCRIPT_REF}) ([\`${SCRIPT_SHA}\`](https://github.com/${SCRIPT_REPO}/tree/${SCRIPT_SHA}))
+            U-Boot: [${UBOOT_REPO}@${UBOOT_RELEASE}](https://github.com/${UBOOT_REPO}/releases/tag/${UBOOT_RELEASE}) ([\`${UBOOT_TAG}\`](https://github.com/${UBOOT_REPO}/releases/tag/${UBOOT_TAG}))
+            Armbian: [${ARMBIAN_REPO}@${ARMBIAN_REF}](https://github.com/${ARMBIAN_REPO}/tree/${ARMBIAN_REF}) ([\`${ARMBIAN_SHA}\`](https://github.com/${ARMBIAN_REPO}/tree/${ARMBIAN_SHA}))
+
+            ${PATCHES:+$(
+              echo "# Patches"
+              echo "${PATCHES}" | tr ',' '\n' | sed -E 's|(.*)|[armbian/build#\1](http://github.com/armbian/build/pull/\1)|'
+            )}
+
+            # SHA256
+          EOF
+
+          echo "NAME=$(head --line=1 Release.md)" >>$GITHUB_ENV
+          tail --line=+2 Release.md >Body.md
+
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ env.NAME }}
+          body_path: Body.md
+
+  build-debs:
+    name: Build ${{ matrix.BRANCH }}
     needs: prepare
     runs-on: ubuntu-22.04
     strategy:
@@ -58,11 +129,87 @@ jobs:
         BRANCH:
           - edge
           - current
+
+    steps:
+      - name: Import env
+        run: |
+          echo "$(echo "${{ needs.prepare.outputs.env }}" | base64 -d)" >>$GITHUB_ENV
+
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ env.ARMBIAN_REPO }}
+          ref: ${{ env.ARMBIAN_SHA }}
+
+      - name: "Apply patch ${{ env.PATCHES }}"
+        if: ${{ env.PATCHES }}
+        run: |
+          echo "::group::Download"
+          curl -L -O "https://github.com/armbian/build/pull/{${PATCHES}}.patch"
+          echo "::endgroup::"
+
+          for file in *.patch; do
+            echo "::group::Applying $file"
+            patch --batch -p1 -N <"$file"
+            echo "::endgroup::"
+          done
+
+      - name: Build
+        run: |
+          # Don't update remote cache
+          export GITHUB_ACTIONS=false
+          sudo --preserve-env \
+            ./compile.sh kernel \
+              ALLOW_ROOT=yes \
+              BOARD=onecloud \
+              BRANCH=${{ matrix.BRANCH }} \
+              EXPERT=yes \
+              USE_CCACHE=no
+          sudo chown $(id -u):$(id -g) -R output/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: debs-${{ matrix.BRANCH }}
+          path: output/debs/*
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.TAG }}
+          files: |
+            output/debs/*
+
+  build:
+    name: Build ${{ matrix.RELEASE }}-${{ matrix.BRANCH }}-${{ matrix.TYPE == 'desktop' && matrix.DESKTOP_ENVIRONMENT || matrix.TYPE }}
+    needs: [ prepare, build-debs ]
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        BRANCH:
+          - edge
+          - current
         RELEASE:
-          - noble # Ubuntu 24.04
+          # - focal # Ubuntu 20.04 LTS
+          # - jammy # Ubuntu 22.04 LTS
+          - noble # Ubuntu 24.04 LTS
+          # - buster # Debian 10
+          # - bullseye # Debian 11
           - bookworm # Debian 12
         TYPE:
           - minimal
+          # - cli
+          # - desktop
+#        include:
+#          - TYPE: desktop
+#            DESKTOP_ENVIRONMENT: xfce
+#            DESKTOP_ENVIRONMENT_CONFIG_NAME: config_base
+#            DESKTOP_APPGROUPS_SELECTED: ""
+#        exclude:
+#          - RELEASE: sid
+#            TYPE: desktop
+
     steps:
       - name: Import env
         run: |
@@ -122,6 +269,7 @@ jobs:
         run: |
           git clone https://github.com/raysworld/onecloud-emmc-install /tmp/onecloud-emmc-install
           cp -r /tmp/onecloud-emmc-install/* output/debs/boot/
+          name: CI
 
       - name: Install Dependents
         run: |
