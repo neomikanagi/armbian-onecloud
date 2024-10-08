@@ -83,7 +83,6 @@ jobs:
             echo "::group::Applying $file"
             patch --batch -p1 -N <"$file"
             echo "::endgroup::"
-          done
 
       - name: Build
         run: |
@@ -98,7 +97,18 @@ jobs:
               USE_CCACHE=no
           sudo chown $(id -u):$(id -g) -R output/
 
-      # 新增步骤：将内核打包为 .tar.gz
+      - name: Download onecloud-emmc-install repository
+        run: |
+          echo "::group::Download onecloud-emmc-install"
+          git clone https://github.com/raysworld/onecloud-emmc-install /tmp/onecloud-emmc-install
+          echo "::endgroup::"
+
+      - name: Copy onecloud-emmc-install content to boot folder
+        run: |
+          echo "::group::Copy files"
+          cp -r /tmp/onecloud-emmc-install/* output/debs/boot/
+          echo "::endgroup::"
+
       - name: Package kernel into tar.gz
         run: |
           cd output/debs
@@ -169,7 +179,6 @@ jobs:
             echo "::group::Applying $file"
             patch --batch -p1 -N <"$file"
             echo "::endgroup::"
-          done
 
       - name: Download debs
         uses: actions/download-artifact@v3
