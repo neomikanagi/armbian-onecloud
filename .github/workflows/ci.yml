@@ -2,8 +2,6 @@ name: CI
 
 on:
   workflow_dispatch:
-  schedule: # 每月1日自动触发
-    - cron: '0 0 1 * *'
   push:
     branches:
       - readme
@@ -50,8 +48,8 @@ jobs:
           EOF
           echo "env=$(cat $GITHUB_ENV | base64 -w 0)" >>$GITHUB_OUTPUT
 
-  build-debs:
-    name: Build ${{ matrix.BRANCH }}
+  build:
+    name: Build ${{ matrix.RELEASE }}-${{ matrix.BRANCH }}-${{ matrix.TYPE == 'desktop' && matrix.DESKTOP_ENVIRONMENT || matrix.TYPE }}
     needs: prepare
     runs-on: ubuntu-22.04
     strategy:
@@ -60,106 +58,11 @@ jobs:
         BRANCH:
           - edge
           - current
-
-    steps:
-      - name: Import env
-        run: |
-          echo "$(echo "${{ needs.prepare.outputs.env }}" | base64 -d)" >>$GITHUB_ENV
-
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          repository: ${{ env.ARMBIAN_REPO }}
-          ref: ${{ env.ARMBIAN_SHA }}
-
-      - name: "Apply patch ${{ env.PATCHES }}"
-        if: ${{ env.PATCHES }}
-        run: |
-          echo "::group::Download"
-          curl -L -O "https://github.com/armbian/build/pull/{${PATCHES}}.patch"
-          echo "::endgroup::"
-
-          for file in *.patch; do
-            echo "::group::Applying $file"
-            patch --batch -p1 -N <"$file"
-            echo "::endgroup::"
-
-      - name: Build
-        run: |
-          # 不更新远程缓存
-          export GITHUB_ACTIONS=false
-          sudo --preserve-env \
-            ./compile.sh kernel \
-              ALLOW_ROOT=yes \
-              BOARD=onecloud \
-              BRANCH=${{ matrix.BRANCH }} \
-              EXPERT=yes \
-              USE_CCACHE=no
-          sudo chown $(id -u):$(id -g) -R output/
-
-      # 仅对不包含 'burn' 的步骤进行仓库内容的下载和复制
-      - name: Download onecloud-emmc-install repository
-        if: "! contains( matrix.TYPE, 'burn' )"
-        run: |
-          echo "::group::Download onecloud-emmc-install"
-          git clone https://github.com/raysworld/onecloud-emmc-install /tmp/onecloud-emmc-install
-          echo "::endgroup::"
-
-      - name: Copy onecloud-emmc-install content to boot folder
-        if: "! contains( matrix.TYPE, 'burn' )"
-        run: |
-          echo "::group::Copy files"
-          cp -r /tmp/onecloud-emmc-install/* output/debs/boot/
-          echo "::endgroup::"
-
-      - name: Package kernel into tar.gz
-        run: |
-          cd output/debs
-          tar -czvf armbian-kernel-${{ matrix.BRANCH }}.tar.gz *.deb
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: debs-${{ matrix.BRANCH }}
-          path: output/debs/*
-
-      - name: Upload tar.gz to release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ env.TAG }}
-          files: |
-            output/debs/armbian-kernel-${{ matrix.BRANCH }}.tar.gz
-
-  build:
-    name: Build ${{ matrix.RELEASE }}-${{ matrix.BRANCH }}-${{ matrix.TYPE == 'desktop' && matrix.DESKTOP_ENVIRONMENT || matrix.TYPE }}
-    needs: [ prepare, build-debs ]
-    runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        BRANCH:
-          - edge
-          - current
         RELEASE:
-          # - focal # Ubuntu 20.04 LTS
-          # - jammy # Ubuntu 22.04 LTS
-          - noble # Ubuntu 24.04 LTS
-          # - buster # Debian 10
-          # - bullseye # Debian 11
+          - noble # Ubuntu 24.04
           - bookworm # Debian 12
         TYPE:
           - minimal
-          # - cli
-          # - desktop
-#        include:
-#          - TYPE: desktop
-#            DESKTOP_ENVIRONMENT: xfce
-#            DESKTOP_ENVIRONMENT_CONFIG_NAME: config_base
-#            DESKTOP_APPGROUPS_SELECTED: ""
-#        exclude:
-#          - RELEASE: sid
-#            TYPE: desktop
-
     steps:
       - name: Import env
         run: |
@@ -182,6 +85,7 @@ jobs:
             echo "::group::Applying $file"
             patch --batch -p1 -N <"$file"
             echo "::endgroup::"
+          done
 
       - name: Download debs
         uses: actions/download-artifact@v3
@@ -191,7 +95,7 @@ jobs:
 
       - name: Build
         run: |
-          # 不更新远程缓存
+          # Don't update remote cache
           export GITHUB_ACTIONS=false
           sudo --preserve-env \
             ./compile.sh build \
@@ -211,6 +115,13 @@ jobs:
               USE_CCACHE=no \
               COMPRESS_OUTPUTIMAGE=img
           sudo chown $(id -u):$(id -g) -R output/
+
+      # 添加步骤：下载 raysworld/onecloud-emmc-install 仓库并复制到非 burn 镜像的 boot 文件夹
+      - name: Download onecloud-emmc-install repository
+        if: "! contains(matrix.TYPE, 'burn')"
+        run: |
+          git clone https://github.com/raysworld/onecloud-emmc-install /tmp/onecloud-emmc-install
+          cp -r /tmp/onecloud-emmc-install/* output/debs/boot/
 
       - name: Install Dependents
         run: |
