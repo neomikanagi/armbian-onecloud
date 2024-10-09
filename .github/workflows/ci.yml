@@ -273,7 +273,6 @@ jobs:
           sudo cp -r /tmp/onecloud-emmc-install/* /mnt/boot/
           sudo umount /mnt/boot
           sudo losetup -d $loop
-          name: CI
 
       - name: Install Dependents
         run: |
