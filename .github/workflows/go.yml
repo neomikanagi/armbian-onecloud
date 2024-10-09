@@ -1,10 +1,11 @@
+name: Build Armbian Minimal
+
 on:
+  # 每月1号1点1分自动触发编译
+  schedule:
+    - cron: '1 1 1 * *'
+  # 手动触发
   workflow_dispatch:
-  push:
-    branches:
-      - readme
-    paths:
-      - .github/workflows/ci.yml
 
 env:
   SCRIPT_REPO: ${{ github.repository }}
