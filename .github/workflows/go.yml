@@ -267,13 +267,17 @@ jobs:
       - name: Download onecloud-emmc-install repository
         run: |
           git clone https://github.com/raysworld/onecloud-emmc-install /tmp/onecloud-emmc-install
-          diskimg=$(ls output/images/*.img)
-          loop=$(sudo losetup --find --show --partscan $diskimg)
-          sudo mkdir -p /mnt/boot
-          sudo mount ${loop}p1 /mnt/boot
-          sudo cp -r /tmp/onecloud-emmc-install/* /mnt/boot/
-          sudo umount /mnt/boot
-          sudo losetup -d $loop
+          diskimg=$(ls output/images/*.img | grep -v 'burn')
+          if [[ -n "$diskimg" ]]; then
+            loop=$(sudo losetup --find --show --partscan $diskimg)
+            sudo mkdir -p /mnt/boot
+            sudo mount ${loop}p1 /mnt/boot
+            sudo cp -r /tmp/onecloud-emmc-install/* /mnt/boot/
+            sudo umount /mnt/boot
+            sudo losetup -d $loop
+          else
+            echo "No non-burn image found. Skipping this step."
+          fi
 
       - name: Install Dependents
         run: |
