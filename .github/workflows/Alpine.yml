@@ -1,79 +1,158 @@
-name: Build Armbian with Alpine rootfs
+name: Build Armbian Minimal with Alpine Rootfs
 
 on:
-  push:
-    tags:
-      - '*'
+  # 每月1号1点1分自动触发编译
+  schedule:
+    - cron: '1 1 1 * *'
+  # 手动触发
   workflow_dispatch:
 
+env:
+  SCRIPT_REPO: ${{ github.repository }}
+  SCRIPT_REF: ${{ github.ref_name }}
+  UBOOT_REPO: hzyitc/u-boot-onecloud
+  UBOOT_RELEASE: latest
+  UBOOT_BURNIMG: eMMC.burn.img
+  ARMBIAN_REPO: armbian/build
+  ARMBIAN_REF: main
+  PATCHES: 4077,5076
+  PATCHES_DISABLED: 5082
+
+permissions:
+  contents: write
+
 jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        type: [current, edge]
-    
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-22.04
+    outputs:
+      env: ${{ steps.get.outputs.env }}
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - id: get
+        name: Get repositories information
+        run: |
+          TIME="$(curl https://api.github.com/repos/${SCRIPT_REPO}/actions/runs/${GITHUB_RUN_ID} | jq -r .created_at)"
+          TAG="ci-$(date -d "${TIME}" -u +'%Y%m%d-%H%M%S-%Z')"
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y xz-utils wget jq qemu-utils
+          SCRIPT_SHA=$(curl https://api.github.com/repos/${SCRIPT_REPO}/commits/${SCRIPT_REF} | jq -r .sha)
+          UBOOT_TAG=$(curl https://api.github.com/repos/${UBOOT_REPO}/releases/${UBOOT_RELEASE} | jq -r .tag_name)
+          ARMBIAN_SHA=$(curl https://api.github.com/repos/${ARMBIAN_REPO}/commits/${ARMBIAN_REF} | jq -r .sha)
 
-    - name: Fetch latest tag
-      id: get_tag
-      run: |
-        LATEST_TAG=$(curl -s https://api.github.com/repos/${{ github.repository }}/tags | jq -r '.[0].name')
-        echo "LATEST_TAG=${LATEST_TAG}" >> $GITHUB_ENV
-    
-    - name: Download Armbian Image
-      run: |
-        # 根据矩阵任务类型，选择不同的 Armbian 文件 (带burn的.img.xz)
-        if [ "${{ matrix.type }}" == "current" ]; then
-          IMG_NAME=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ env.LATEST_TAG }} | jq -r '.assets[] | select(.name | test("Onecloud_bookworm_current.*burn.*\\.img\\.xz$")) | .browser_download_url')
-        else
-          IMG_NAME=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ env.LATEST_TAG }} | jq -r '.assets[] | select(.name | test("Onecloud_bookworm_edge.*burn.*\\.img\\.xz$")) | .browser_download_url')
-        fi
-        
-        # 检查是否找到文件
-        if [ -z "$IMG_NAME" ]; then
-          echo "No matching Armbian image found."
-          exit 1
-        fi
-        
-        # 下载镜像
-        wget $IMG_NAME -O armbian_${{ matrix.type }}.img.xz
-        
-    - name: Decompress the Armbian Image
-      run: |
-        xz -d armbian_${{ matrix.type }}.img.xz
-        mkdir -p /mnt/armbian_${{ matrix.type }}
-        sudo losetup -fP armbian_${{ matrix.type }}.img
-        sudo mount /dev/loop0p2 /mnt/armbian_${{ matrix.type }}
+          cat <<EOF | sed -E 's/^  //' >>$GITHUB_ENV
+            TIME=$TIME
+            TAG=$TAG
+            SCRIPT_SHA=$SCRIPT_SHA
+            UBOOT_TAG=$UBOOT_TAG
+            ARMBIAN_SHA=$ARMBIAN_SHA
+          EOF
+          echo "env=$(cat $GITHUB_ENV | base64 -w 0)" >>$GITHUB_OUTPUT
 
-    - name: Fetch latest Alpine rootfs
-      run: |
-        LATEST_ALPINE_VERSION=$(wget -qO- http://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/ | grep -oP 'alpine-minirootfs-\K[0-9]+\.[0-9]+\.[0-9]+(?=-aarch64.tar.gz)' | sort -V | tail -1)
-        wget http://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-minirootfs-${LATEST_ALPINE_VERSION}-aarch64.tar.gz
-        mkdir -p /mnt/alpine_rootfs
-        sudo tar -xzvf alpine-minirootfs-${LATEST_ALPINE_VERSION}-aarch64.tar.gz -C /mnt/alpine_rootfs
+  build:
+    name: Build with Matrix
+    needs: prepare
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        BRANCH:
+          - edge
+          - current
+        RELEASE:
+          - bookworm
+    steps:
+      - name: Import env
+        run: |
+          echo "$(echo "${{ needs.prepare.outputs.env }}" | base64 -d)" >>$GITHUB_ENV
 
-    - name: Replace Armbian rootfs with Alpine rootfs
-      run: |
-        sudo rm -rf /mnt/armbian_${{ matrix.type }}/*
-        sudo cp -a /mnt/alpine_rootfs/* /mnt/armbian_${{ matrix.type }}
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ env.ARMBIAN_REPO }}
+          ref: ${{ env.ARMBIAN_SHA }}
 
-    - name: Unmount and repack the image
-      run: |
-        sudo umount /mnt/armbian_${{ matrix.type }}
-        sudo losetup -d /dev/loop0
-        xz -z -9 armbian_${{ matrix.type }}.img
+      - name: "Apply patches if applicable"
+        if: ${{ env.PATCHES }}
+        run: |
+          echo "::group::Download"
+          curl -L -O "https://github.com/armbian/build/pull/{${PATCHES}}.patch"
+          echo "::endgroup::"
 
-    - name: Upload to release
-      uses: actions/upload-artifact@v3
-      with:
-        name: alpine-armbian-${{ matrix.type }}
-        path: armbian_${{ matrix.type }}.img.xz
+          for file in *.patch; do
+            echo "::group::Applying $file"
+            patch --batch -p1 -N <"$file"
+            echo "::endgroup::"
+          done
+
+      - name: Build Armbian
+        run: |
+          sudo --preserve-env ./compile.sh build \
+            ALLOW_ROOT=yes \
+            BOARD=onecloud \
+            BRANCH=${{ matrix.BRANCH }} \
+            RELEASE=${{ matrix.RELEASE }} \
+            BUILD_MINIMAL=yes \
+            COMPRESS_OUTPUTIMAGE=img
+
+      - name: Find the burn images
+        run: |
+          export IMG_CURRENT=$(find output/images -name "Armbian-unofficial_*_Onecloud_${{ matrix.RELEASE }}_current_*burn*.img.xz" -print -quit)
+          export IMG_EDGE=$(find output/images -name "Armbian-unofficial_*_Onecloud_${{ matrix.RELEASE }}_edge_*burn*.img.xz" -print -quit)
+
+          if [ -z "$IMG_CURRENT" ] && [ -z "$IMG_EDGE" ]; then
+            echo "No burn images found, exiting."
+            exit 1
+          fi
+          
+          echo "Current burn image: $IMG_CURRENT"
+          echo "Edge burn image: $IMG_EDGE"
+
+      - name: Decompress burn images
+        run: |
+          if [ -n "$IMG_CURRENT" ]; then
+            xz -d $IMG_CURRENT
+            export IMG_CURRENT=${IMG_CURRENT%.xz}
+          fi
+
+          if [ -n "$IMG_EDGE" ]; then
+            xz -d $IMG_EDGE
+            export IMG_EDGE=${IMG_EDGE%.xz}
+          fi
+
+      - name: Fetch latest Alpine rootfs
+        run: |
+          LATEST_ALPINE_VERSION=$(wget -qO- http://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/ | grep -oP 'alpine-minirootfs-\K[0-9]+\.[0-9]+\.[0-9]+(?=-aarch64.tar.gz)' | sort -V | tail -1)
+          wget http://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-minirootfs-${LATEST_ALPINE_VERSION}-aarch64.tar.gz
+          mkdir -p /mnt/alpine_rootfs
+          sudo tar -xzvf alpine-minirootfs-${LATEST_ALPINE_VERSION}-aarch64.tar.gz -C /mnt/alpine_rootfs
+
+      - name: Mount, Replace rootfs and Repack
+        run: |
+          if [ -n "$IMG_CURRENT" ]; then
+            sudo losetup -fP $IMG_CURRENT
+            LOOP=$(losetup | grep $IMG_CURRENT | awk '{print $1}')
+            sudo mount ${LOOP}p2 /mnt/armbian_current
+            sudo rm -rf /mnt/armbian_current/*
+            sudo cp -a /mnt/alpine_rootfs/* /mnt/armbian_current
+            sudo umount /mnt/armbian_current
+            sudo losetup -d $LOOP
+            xz -z -9 $IMG_CURRENT
+          fi
+
+          if [ -n "$IMG_EDGE" ]; then
+            sudo losetup -fP $IMG_EDGE
+            LOOP=$(losetup | grep $IMG_EDGE | awk '{print $1}')
+            sudo mount ${LOOP}p2 /mnt/armbian_edge
+            sudo rm -rf /mnt/armbian_edge/*
+            sudo cp -a /mnt/alpine_rootfs/* /mnt/armbian_edge
+            sudo umount /mnt/armbian_edge
+            sudo losetup -d $LOOP
+            xz -z -9 $IMG_EDGE
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: alpine-armbian-images
+          path: |
+            $IMG_CURRENT
+            $IMG_EDGE
