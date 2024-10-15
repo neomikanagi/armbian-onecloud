@@ -1,0 +1,79 @@
+name: Build Armbian with Alpine rootfs
+
+on:
+  push:
+    tags:
+      - '*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        type: [current, edge]
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y xz-utils wget jq qemu-utils
+
+    - name: Fetch latest tag
+      id: get_tag
+      run: |
+        LATEST_TAG=$(curl -s https://api.github.com/repos/${{ github.repository }}/tags | jq -r '.[0].name')
+        echo "LATEST_TAG=${LATEST_TAG}" >> $GITHUB_ENV
+    
+    - name: Download Armbian Image
+      run: |
+        # 根据矩阵任务类型，选择不同的 Armbian 文件 (带burn的.img.xz)
+        if [ "${{ matrix.type }}" == "current" ]; then
+          IMG_NAME=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ env.LATEST_TAG }} | jq -r '.assets[] | select(.name | test("Onecloud_bookworm_current.*burn.*\\.img\\.xz$")) | .browser_download_url')
+        else
+          IMG_NAME=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ env.LATEST_TAG }} | jq -r '.assets[] | select(.name | test("Onecloud_bookworm_edge.*burn.*\\.img\\.xz$")) | .browser_download_url')
+        fi
+        
+        # 检查是否找到文件
+        if [ -z "$IMG_NAME" ]; then
+          echo "No matching Armbian image found."
+          exit 1
+        fi
+        
+        # 下载镜像
+        wget $IMG_NAME -O armbian_${{ matrix.type }}.img.xz
+        
+    - name: Decompress the Armbian Image
+      run: |
+        xz -d armbian_${{ matrix.type }}.img.xz
+        mkdir -p /mnt/armbian_${{ matrix.type }}
+        sudo losetup -fP armbian_${{ matrix.type }}.img
+        sudo mount /dev/loop0p2 /mnt/armbian_${{ matrix.type }}
+
+    - name: Fetch latest Alpine rootfs
+      run: |
+        LATEST_ALPINE_VERSION=$(wget -qO- http://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/ | grep -oP 'alpine-minirootfs-\K[0-9]+\.[0-9]+\.[0-9]+(?=-aarch64.tar.gz)' | sort -V | tail -1)
+        wget http://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-minirootfs-${LATEST_ALPINE_VERSION}-aarch64.tar.gz
+        mkdir -p /mnt/alpine_rootfs
+        sudo tar -xzvf alpine-minirootfs-${LATEST_ALPINE_VERSION}-aarch64.tar.gz -C /mnt/alpine_rootfs
+
+    - name: Replace Armbian rootfs with Alpine rootfs
+      run: |
+        sudo rm -rf /mnt/armbian_${{ matrix.type }}/*
+        sudo cp -a /mnt/alpine_rootfs/* /mnt/armbian_${{ matrix.type }}
+
+    - name: Unmount and repack the image
+      run: |
+        sudo umount /mnt/armbian_${{ matrix.type }}
+        sudo losetup -d /dev/loop0
+        xz -z -9 armbian_${{ matrix.type }}.img
+
+    - name: Upload to release
+      uses: actions/upload-artifact@v3
+      with:
+        name: alpine-armbian-${{ matrix.type }}
+        path: armbian_${{ matrix.type }}.img.xz
